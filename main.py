@@ -177,12 +177,20 @@ def check_access(
                 logging.warning(f"Skipping permission entry. Principals must be a list: {permission_entry}")
                 continue
 
+            # Expansion stops at one level. I add the groups named for
+            # the user, but a group that is itself a member of another
+            # group does not pull that second group in, so nested group
+            # access is missed rather than traced.
             # Expand the user through the membership map: the user's own
             # name plus every group and role the map lists for them.
             expanded = {user}
             if memberships:
                 for name in memberships.get(user, []):
                     expanded.add(name)
+            # access_type is never compared against a request here,
+            # because the caller never names one. An entry granting only
+            # write still lands in the result as an access path, and it
+            # is on the reader to check the type printed beside it.
             if not any(principal in expanded for principal in principals):
                 continue
 
@@ -295,6 +303,9 @@ def main():
             args.user, args.resource, args.resource_type, permissions_data, memberships
         )
 
+        # Text mode prints the result twice on purpose of the layout I
+        # kept: once as the plain formatted block and once as the rich
+        # tree below. A script scraping stdout sees both copies.
         if args.output_format == 'text':
             formatted_output = format_access_path(access_path, args.output_format, args.user, args.resource)
             print(formatted_output)
