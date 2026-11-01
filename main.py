@@ -85,16 +85,25 @@ def load_permissions_data(file_path: str) -> List[Dict[str, Any]]:
         file_path (str): The path to the JSON file.
 
     Returns:
-        List[Dict[str, Any]]: A list of permission objects.
+        A tuple of the list of permission objects and the membership map
+        (an empty map when the file holds a plain list).
     """
     import json
 
     try:
         with open(file_path, "r") as f:
             data = json.load(f)
+            if isinstance(data, dict):
+                entries = data.get("permissions")
+                memberships = data.get("memberships", {})
+                if not isinstance(entries, list):
+                    raise ValueError("Permissions data object must hold a list under the 'permissions' key.")
+                if not isinstance(memberships, dict):
+                    raise ValueError("The 'memberships' value must be an object mapping a user to a list of group and role names.")
+                return entries, memberships
             if not isinstance(data, list):
                 raise ValueError("Permissions data must be a list of dictionaries.")
-            return data
+            return data, {}
     except FileNotFoundError:
         logging.error(f"Permissions data file not found: {file_path}")
         raise
@@ -109,11 +118,27 @@ def load_permissions_data(file_path: str) -> List[Dict[str, Any]]:
         raise
 
 
+def count_usable_entries(permissions_data: List[Dict[str, Any]]) -> int:
+    """Counts the entries that hold the keys a match can use."""
+    count = 0
+    for entry in permissions_data:
+        if (
+            isinstance(entry, dict)
+            and "principals" in entry
+            and "resource" in entry
+            and "access_type" in entry
+            and isinstance(entry["principals"], list)
+        ):
+            count += 1
+    return count
+
+
 def check_access(
     user: str,
     resource: str,
     resource_type: str,
     permissions_data: List[Dict[str, Any]],
+    memberships: Dict[str, Any] = None,
 ) -> List[Dict[str, Any]]:
     """
     Checks if a user has access to a resource based on the provided permissions data.
@@ -152,8 +177,18 @@ def check_access(
                 logging.warning(f"Skipping permission entry. Principals must be a list: {permission_entry}")
                 continue
 
-            # Check if the user is in the list of principals
-            if user not in principals:
+            # Expand the user through the membership map: the user's own
+            # name plus every group and role the map lists for them.
+            expanded = {user}
+            if memberships:
+                for name in memberships.get(user, []):
+                    expanded.add(name)
+            if not any(principal in expanded for principal in principals):
+                continue
+
+            # An entry that names a resource type matches only that type.
+            entry_resource_type = permission_entry.get("resource_type")
+            if entry_resource_type is not None and entry_resource_type != resource_type:
                 continue
 
             # Use pathspec to match resource paths. Handle errors during pathspec compilation.
@@ -173,7 +208,7 @@ def check_access(
     return access_path
 
 
-def format_access_path(access_path: List[Dict[str, Any]], output_format: str) -> str:
+def format_access_path(access_path: List[Dict[str, Any]], output_format: str, user: str = "", resource: str = "") -> str:
     """
     Formats the access path into a human-readable string or graphviz format.
 
@@ -197,7 +232,8 @@ def format_access_path(access_path: List[Dict[str, Any]], output_format: str) ->
         # This is a placeholder.  A full implementation would generate DOT language output.
         output = "digraph AccessPath {\n"
         output += '  node [shape=box];\n'
-        output += f'  "{user}" -> "{resource}" [label="{access_path[0]["access_type"] if access_path else "N/A"}"];\n' # Placeholder
+        for entry in access_path:
+            output += f'  "{user}" -> "{resource}" [label="{entry["access_type"]}"];\n'
         output += "}"
         return output
     else:
@@ -247,16 +283,23 @@ def main():
         sys.exit(1)
 
     try:
-        permissions_data = load_permissions_data(args.permissions_data)
+        permissions_data, memberships = load_permissions_data(args.permissions_data)
+        entry_count = count_usable_entries(permissions_data)
+        logging.info(f"Permission entries loaded: {entry_count}")
+        print(f"Permission entries loaded: {entry_count}")
+        if entry_count == 0:
+            logging.error("No permission entries loaded.")
+            print("No permission entries loaded.", file=sys.stderr)
+            sys.exit(1)
         access_path = check_access(
-            args.user, args.resource, args.resource_type, permissions_data
+            args.user, args.resource, args.resource_type, permissions_data, memberships
         )
 
         if args.output_format == 'text':
-            formatted_output = format_access_path(access_path, args.output_format)
+            formatted_output = format_access_path(access_path, args.output_format, args.user, args.resource)
             print(formatted_output)
         else:
-            formatted_output = format_access_path(access_path, args.output_format)
+            formatted_output = format_access_path(access_path, args.output_format, args.user, args.resource)
             print(formatted_output)
             # To visualize this graphviz output, you'd need to save it to a .dot file
             # and then use the graphviz command-line tools (e.g., `dot -Tpng output.dot -o output.png`).
